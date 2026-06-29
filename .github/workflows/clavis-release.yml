@@ -158,10 +158,12 @@ jobs:
             runner: macos-15
             target: macos-clang-arm64
             xcode: /Applications/Xcode_16.3.app/Contents/Developer
+          # GitHub no longer offers Intel macOS runners, so cross-compile the
+          # x86_64 build on the Apple-Silicon runner (clang -arch x86_64).
           - arch: x86_64
-            runner: macos-13
+            runner: macos-15
             target: macos-64-clang
-            xcode: ''
+            xcode: /Applications/Xcode_16.3.app/Contents/Developer
     env:
       CRAFT_TARGET: ${{ matrix.target }}
       CRAFT_MASTER_LOCATION: ${{ github.workspace }}/CraftMaster
