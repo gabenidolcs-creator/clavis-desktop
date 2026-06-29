@@ -1,0 +1,5 @@
+<svg width="232" height="64" viewBox="0 0 232 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Clavis">
+  <circle cx="32" cy="27" r="9" fill="#FFFFFF"/>
+  <path d="M28.5 33 L35.5 33 L38 46.5 Q38.2 48 36.7 48 L27.3 48 Q25.8 48 26 46.5 Z" fill="#FFFFFF"/>
+  <text x="60" y="43" font-family="'Manrope', 'Segoe UI', ui-sans-serif, sans-serif" font-size="40" font-weight="700" letter-spacing="-1.4" fill="#FFFFFF">clavis</text>
+</svg>

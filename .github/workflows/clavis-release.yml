@@ -1,0 +1,182 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Clavis Desktop — release build (Linux AppImage + Windows installer + macOS dmg)
+# Triggered by pushing a tag like `clavis-v3.18.0` (or run manually).
+name: Clavis Release
+
+on:
+  push:
+    tags:
+      - 'clavis-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create/use (e.g. clavis-v3.18.0)'
+        required: true
+        default: 'clavis-v0.0.0-dev'
+
+permissions:
+  contents: write
+
+env:
+  CLAVIS_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  prepare:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ env.CLAVIS_TAG }}
+    steps:
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "${CLAVIS_TAG}" >/dev/null 2>&1; then
+            echo "Release ${CLAVIS_TAG} already exists."
+          else
+            gh release create "${CLAVIS_TAG}" \
+              --title "Clavis Desktop ${CLAVIS_TAG}" \
+              --notes "Clavis Desktop client — đồng bộ tệp cho Clavis Cloud. Bản dựng tự động." \
+              --latest
+          fi
+
+  linux:
+    name: Linux AppImage
+    needs: prepare
+    runs-on: ubuntu-latest
+    container: ghcr.io/nextcloud/continuous-integration-client-appimage-qt6:client-appimage-el8-6.10.2-4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+
+      - name: Build AppImage
+        id: build-appimage
+        run: |
+          BUILDNR=${GITHUB_RUN_ID} VERSION_SUFFIX=clavis BUILD_UPDATER=ON \
+            DESKTOP_CLIENT_ROOT=`pwd` APPNAME=Clavis EXECUTABLE_NAME=clavis \
+            QT_BASE_DIR=/root/linux-gcc-x86_64 \
+            /bin/bash -c "./admin/linux/build-appimage.sh"
+
+      - name: Upload AppImage to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ASSET="${{ steps.build-appimage.outputs.APPIMAGE_NAME }}"
+          # Normalise to a stable, brand-friendly download name.
+          cp "${ASSET}" "Clavis-x86_64.AppImage"
+          gh release upload "${{ needs.prepare.outputs.tag }}" \
+            "${ASSET}" "Clavis-x86_64.AppImage" --clobber
+
+  windows:
+    name: Windows installer
+    needs: prepare
+    runs-on: windows-2022
+    env:
+      CRAFT_TARGET: windows-msvc2022_64-cl
+      CRAFT_MASTER_LOCATION: ${{ github.workspace }}\CraftMaster
+      CRAFT_MASTER_CONFIG: ${{ github.workspace }}\craftmaster.ini
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Craft + dependencies
+        shell: pwsh
+        run: |
+          & cmd /C "git clone -q --depth=1 https://invent.kde.org/packaging/craftmaster.git ${{ env.CRAFT_MASTER_LOCATION }} 2>&1"
+          function craft() {
+              python "${{ env.CRAFT_MASTER_LOCATION }}\CraftMaster.py" --config "${{ env.CRAFT_MASTER_CONFIG }}" --target ${{ env.CRAFT_TARGET }} -c $args
+              if($LASTEXITCODE -ne 0) {exit $LASTEXITCODE}
+          }
+          craft --add-blueprint-repository "https://github.com/nextcloud/craft-blueprints-kde.git|stable-34.0|"
+          craft --add-blueprint-repository "https://github.com/nextcloud/craft-blueprints-nextcloud.git|stable-34.0|"
+          craft craft
+          craft --install-deps nextcloud-client
+
+      - name: Install inkscape
+        shell: pwsh
+        run: choco install inkscape -y
+
+      - name: Compile + package
+        shell: pwsh
+        run: |
+          function craft() {
+              python "${{ env.CRAFT_MASTER_LOCATION }}\CraftMaster.py" --config "${{ env.CRAFT_MASTER_CONFIG }}" --target ${{ env.CRAFT_TARGET }} -c $args
+              if($LASTEXITCODE -ne 0) {exit $LASTEXITCODE}
+          }
+          craft --src-dir ${{ github.workspace }} nextcloud-client
+          craft --src-dir ${{ github.workspace }} --package nextcloud-client
+
+      - name: Locate + upload installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          Write-Host "Searching for produced installers..."
+          $exes = Get-ChildItem -Path "${{ github.workspace }}" -Recurse -Include *.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 10MB -and $_.FullName -notmatch '\\build\\' -and $_.FullName -notmatch '\\bin\\' }
+          $exes | ForEach-Object { Write-Host ("FOUND: {0} ({1:N0} bytes)" -f $_.FullName, $_.Length) }
+          $installer = $exes | Sort-Object Length -Descending | Select-Object -First 1
+          if (-not $installer) { Write-Error "No installer .exe found"; exit 1 }
+          $dest = "Clavis-Setup-x64.exe"
+          Copy-Item $installer.FullName $dest
+          gh release upload "${{ needs.prepare.outputs.tag }}" $dest --clobber
+
+  macos:
+    name: macOS dmg (arm64)
+    needs: prepare
+    runs-on: macos-15
+    env:
+      CRAFT_TARGET: macos-clang-arm64
+      CRAFT_MASTER_LOCATION: ${{ github.workspace }}/CraftMaster
+      CRAFT_MASTER_CONFIG: ${{ github.workspace }}/craftmaster.ini
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+
+      - name: Select Xcode 16.3
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Homebrew dependencies
+        run: brew install homebrew/cask/inkscape
+
+      - name: Install Craft + dependencies
+        run: |
+          git clone -q --depth=1 https://invent.kde.org/packaging/craftmaster.git "${CRAFT_MASTER_LOCATION}"
+          craft() { python "${CRAFT_MASTER_LOCATION}/CraftMaster.py" --config "${CRAFT_MASTER_CONFIG}" --target "${CRAFT_TARGET}" -c "$@"; }
+          craft --add-blueprint-repository "https://github.com/nextcloud/craft-blueprints-kde.git|stable-34.0|"
+          craft --add-blueprint-repository "https://github.com/nextcloud/craft-blueprints-nextcloud.git|stable-34.0|"
+          craft craft
+          craft --install-deps nextcloud-client
+
+      - name: Compile + package
+        run: |
+          craft() { python "${CRAFT_MASTER_LOCATION}/CraftMaster.py" --config "${CRAFT_MASTER_CONFIG}" --target "${CRAFT_TARGET}" -c "$@"; }
+          craft --src-dir "${{ github.workspace }}" nextcloud-client
+          craft --src-dir "${{ github.workspace }}" --package nextcloud-client
+
+      - name: Locate + upload dmg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "Searching for produced packages..."
+          PKG=$(find "${{ github.workspace }}" \( -name '*.dmg' -o -name '*.pkg' \) -size +5M 2>/dev/null | head -1)
+          find "${{ github.workspace }}" \( -name '*.dmg' -o -name '*.pkg' \) 2>/dev/null || true
+          if [ -z "$PKG" ]; then echo "No dmg/pkg found"; exit 1; fi
+          EXT="${PKG##*.}"
+          cp "$PKG" "Clavis-arm64.${EXT}"
+          gh release upload "${{ needs.prepare.outputs.tag }}" "Clavis-arm64.${EXT}" --clobber
